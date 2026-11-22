@@ -3,55 +3,21 @@
 // Supabase Edge Function: verify-razorpay-payment
 // Path: supabase/functions/verify-razorpay-payment/index.ts
 //
-// Cryptographically verifies Razorpay payment signatures on the server side
-// using the secret RAZORPAY_KEY_SECRET before updating database order status.
-// Never trusts client-reported payment success.
+// Cryptographically verifies Razorpay payment signature AND conducts a trusted
+// server-to-server API check with Razorpay to verify payment status, amount, and currency.
+// Never trusts client parameters. Never marks an order as failed on invalid signatures.
 // ==============================================================================
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.8";
+import { verifyHmacSha256, validateVerifyPaymentParams } from "../_shared/payment-core.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
-/**
- * Validates the HMAC-SHA256 signature computed from `order_id|payment_id` against Razorpay secret.
- */
-async function verifyHmacSha256(
-  orderId: string,
-  paymentId: string,
-  signature: string,
-  secret: string
-): Promise<boolean> {
-  try {
-    const encoder = new TextEncoder();
-    const data = encoder.encode(`${orderId}|${paymentId}`);
-    const keyData = encoder.encode(secret);
-
-    const cryptoKey = await crypto.subtle.importKey(
-      "raw",
-      keyData,
-      { name: "HMAC", hash: "SHA-256" },
-      false,
-      ["sign"]
-    );
-
-    const signatureBytes = await crypto.subtle.sign("HMAC", cryptoKey, data);
-    const signatureHex = Array.from(new Uint8Array(signatureBytes))
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
-
-    return signatureHex.toLowerCase() === signature.trim().toLowerCase();
-  } catch (err) {
-    console.error("Cryptographic verification error:", err);
-    return false;
-  }
-}
-
 serve(async (req: Request) => {
-  // Handle CORS preflight
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
   }
@@ -66,7 +32,8 @@ serve(async (req: Request) => {
   try {
     const supabaseUrl = Deno.env.get("SUPABASE_URL");
     const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-    const razorpaySecret = Deno.env.get("RAZORPAY_KEY_SECRET");
+    const razorpayKeyId = Deno.env.get("RAZORPAY_KEY_ID");
+    const razorpayKeySecret = Deno.env.get("RAZORPAY_KEY_SECRET");
 
     if (!supabaseUrl || !supabaseServiceKey) {
       console.error("Missing Supabase internal service credentials.");
@@ -76,15 +43,32 @@ serve(async (req: Request) => {
       );
     }
 
-    if (!razorpaySecret) {
-      console.error("Missing RAZORPAY_KEY_SECRET in Edge Function environment.");
+    if (!razorpayKeyId || !razorpayKeySecret) {
+      console.error("Missing RAZORPAY_KEY_ID or RAZORPAY_KEY_SECRET in Edge Function environment.");
       return new Response(
-        JSON.stringify({ error: "Server configuration error: Payment gateway secret not configured." }),
+        JSON.stringify({ error: "Server configuration error: Payment gateway credentials not configured." }),
         { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    const payload = await req.json();
+    let payload: any;
+    try {
+      payload = await req.json();
+    } catch {
+      return new Response(
+        JSON.stringify({ error: "Malformed JSON payload in request body." }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    const validation = validateVerifyPaymentParams(payload);
+    if (!validation.valid) {
+      return new Response(
+        JSON.stringify({ error: validation.error }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
     const {
       order_id,
       razorpay_order_id,
@@ -93,20 +77,12 @@ serve(async (req: Request) => {
       guest_access_token,
     } = payload;
 
-    if (!order_id || !razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
-      return new Response(
-        JSON.stringify({ error: "Missing required payment verification parameters." }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-
-    // Initialize Supabase admin client (privileged execution for RPC)
     const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey);
 
-    // Fetch order record to verify ownership (Customer auth or Guest token)
+    // 1. Fetch Order Record
     const { data: order, error: orderFetchError } = await supabaseAdmin
       .from("orders")
-      .select("id, customer_id, guest_access_token, status, total_amount")
+      .select("id, order_number, customer_id, guest_access_token, status, total_amount")
       .eq("id", order_id)
       .single();
 
@@ -117,7 +93,7 @@ serve(async (req: Request) => {
       );
     }
 
-    // Security check: Either user is signed in as customer_id OR guest_access_token matches
+    // 2. Security Check: Customer auth or Guest access token
     const authHeader = req.headers.get("Authorization");
     let isAuthorized = false;
 
@@ -140,62 +116,149 @@ serve(async (req: Request) => {
       );
     }
 
-    // Cryptographic signature check
-    const isValidSignature = await verifyHmacSha256(
-      razorpay_order_id,
-      razorpay_payment_id,
-      razorpay_signature,
-      razorpaySecret
-    );
+    // 3. Fetch Associated Payment Record
+    const { data: payment, error: paymentFetchError } = await supabaseAdmin
+      .from("payments")
+      .select("id, status, amount, method, razorpay_order_id, razorpay_payment_id")
+      .eq("order_id", order.id)
+      .single();
 
-    if (!isValidSignature) {
-      console.warn(`Payment signature mismatch for Order ${order_id}. Possible tampering attempt.`);
-
-      // Record failed payment attempt in database idempotently
-      await supabaseAdmin.rpc("confirm_order_payment_verified", {
-        p_order_id: order_id,
-        p_razorpay_order_id: razorpay_order_id,
-        p_razorpay_payment_id: razorpay_payment_id,
-        p_razorpay_signature: razorpay_signature,
-        p_payment_status: "failed",
-      });
-
+    if (paymentFetchError || !payment) {
       return new Response(
-        JSON.stringify({ success: false, error: "Payment verification failed: Invalid cryptographic signature." }),
+        JSON.stringify({ error: "No payment record associated with this order." }),
+        { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // 4. Validate That Stored Razorpay Order ID matches the supplied Razorpay order ID
+    if (!payment.razorpay_order_id || payment.razorpay_order_id !== razorpay_order_id) {
+      console.warn(`Mismatched Razorpay Order ID. Stored: ${payment.razorpay_order_id}, Received: ${razorpay_order_id}`);
+      return new Response(
+        JSON.stringify({ error: "Razorpay order ID does not match the payment initialized for this bakery order." }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    // Signature verified successfully -> Execute idempotent state transition
+    // 5. Cryptographic Signature Verification
+    const isSignatureValid = await verifyHmacSha256(
+      razorpay_order_id,
+      razorpay_payment_id,
+      razorpay_signature,
+      razorpayKeySecret
+    );
+
+    if (!isSignatureValid) {
+      console.warn(`Cryptographic signature mismatch for Order ${order.id}. Rejecting verification.`);
+      // Security rule: Do not transition order to payment_failed on invalid signature
+      return new Response(
+        JSON.stringify({ error: "Cryptographic signature verification failed. Payment cannot be verified." }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // 6. Trusted Server-to-Server Razorpay API Fetch
+    const credentials = btoa(`${razorpayKeyId}:${razorpayKeySecret}`);
+    const rzpPaymentResponse = await fetch(
+      `https://api.razorpay.com/v1/payments/${razorpay_payment_id}`,
+      {
+        headers: {
+          Authorization: `Basic ${credentials}`,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    if (!rzpPaymentResponse.ok) {
+      const errBody = await rzpPaymentResponse.text();
+      console.error("Razorpay API payment fetch failed:", errBody);
+      return new Response(
+        JSON.stringify({ error: "Unable to verify payment status with payment gateway." }),
+        { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    const rzpPayment = await rzpPaymentResponse.json();
+
+    // 7. Verify Integrity of Server Response
+    if (rzpPayment.order_id !== razorpay_order_id) {
+      console.error(`Gateway reported different order_id (${rzpPayment.order_id}) than client (${razorpay_order_id})`);
+      return new Response(
+        JSON.stringify({ error: "Payment gateway mismatch between payment and order reference." }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    const expectedPaise = Math.round(order.total_amount * 100);
+    if (rzpPayment.amount !== expectedPaise) {
+      console.error(`Gateway reported amount (${rzpPayment.amount}) != expected (${expectedPaise})`);
+      return new Response(
+        JSON.stringify({ error: "Paid amount does not match order total." }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    if (rzpPayment.currency !== "INR") {
+      return new Response(
+        JSON.stringify({ error: "Payment currency is not INR." }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    if (rzpPayment.status !== "captured") {
+      return new Response(
+        JSON.stringify({
+          error: `Payment is currently in '${rzpPayment.status}' state, not captured. Please complete authorization.`,
+        }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // 8. Execute Database Confirmation RPC
     const { data: confirmResult, error: confirmError } = await supabaseAdmin.rpc(
       "confirm_order_payment_verified",
       {
-        p_order_id: order_id,
+        p_order_id: order.id,
         p_razorpay_order_id: razorpay_order_id,
         p_razorpay_payment_id: razorpay_payment_id,
         p_razorpay_signature: razorpay_signature,
-        p_payment_status: "captured",
+        p_razorpay_webhook_signature: null,
+        p_amount_in_paise: expectedPaise,
+        p_currency: "INR",
       }
     );
 
     if (confirmError) {
-      console.error("RPC confirm_order_payment_verified execution error:", confirmError);
+      console.error("confirm_order_payment_verified RPC execution error:", confirmError);
       return new Response(
-        JSON.stringify({ error: "Failed to persist verified payment state to order." }),
+        JSON.stringify({ error: "Failed to update order payment status in database." }),
         { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    return new Response(JSON.stringify(confirmResult), {
-      status: 200,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+    if (confirmResult && !confirmResult.success && !confirmResult.is_already_confirmed) {
+      console.error("confirm_order_payment_verified rejected validation:", confirmResult);
+      return new Response(
+        JSON.stringify({ error: confirmResult.error }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    return new Response(
+      JSON.stringify({
+        success: true,
+        order_id: order.id,
+        order_number: order.order_number,
+        status: confirmResult?.status || "placed",
+        is_already_confirmed: confirmResult?.is_already_confirmed || false,
+      }),
+      { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+    );
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : "Unknown internal server error";
-    console.error("Unhandled verification exception:", err);
-    return new Response(JSON.stringify({ error: message }), {
-      status: 500,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+    const message = err instanceof Error ? err.message : "Unknown error";
+    console.error("Unhandled error in verify-razorpay-payment:", err);
+    return new Response(
+      JSON.stringify({ error: message }),
+      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+    );
   }
 });

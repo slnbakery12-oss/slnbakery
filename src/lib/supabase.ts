@@ -119,6 +119,7 @@ export interface DatabaseBakerySettings {
   is_online_ordering_enabled: boolean;
   is_cod_enabled: boolean;
   is_online_payment_enabled: boolean;
+  allow_simulated_payments: boolean;
   minimum_order_value: number;
   free_delivery_threshold: number;
   standard_delivery_fee: number;
@@ -194,6 +195,22 @@ export interface CreateOrderSecurelyResult {
   total: number;
   requires_online_payment: boolean;
   is_duplicate?: boolean;
+  error?: string;
+}
+
+export interface CreateRazorpayOrderInput {
+  order_id: string;
+  guest_access_token?: string;
+}
+
+export interface CreateRazorpayOrderResult {
+  success: boolean;
+  razorpay_order_id: string;
+  amount: number;
+  currency: string;
+  key_id: string;
+  order_number: string;
+  is_reused?: boolean;
   error?: string;
 }
 

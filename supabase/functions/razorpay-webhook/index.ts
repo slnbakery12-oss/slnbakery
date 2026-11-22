@@ -5,41 +5,17 @@
 //
 // Webhook receiver for asynchronous payment events dispatched by Razorpay.
 // Verifies webhook signature header 'x-razorpay-signature' against RAZORPAY_WEBHOOK_SECRET.
-// Idempotently marks orders as placed upon 'payment.captured' or 'order.paid'.
+// Resolves order via stored razorpay_order_id, handles payment.captured and order.paid
+// event payloads, validates payload integrity, and idempotently marks order as placed
+// via confirm_order_payment_verified.
 // ==============================================================================
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.8";
-
-async function verifyWebhookSignature(
-  rawBody: string,
-  signature: string,
-  secret: string
-): Promise<boolean> {
-  try {
-    const encoder = new TextEncoder();
-    const data = encoder.encode(rawBody);
-    const keyData = encoder.encode(secret);
-
-    const cryptoKey = await crypto.subtle.importKey(
-      "raw",
-      keyData,
-      { name: "HMAC", hash: "SHA-256" },
-      false,
-      ["sign"]
-    );
-
-    const signatureBytes = await crypto.subtle.sign("HMAC", cryptoKey, data);
-    const signatureHex = Array.from(new Uint8Array(signatureBytes))
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
-
-    return signatureHex.toLowerCase() === signature.trim().toLowerCase();
-  } catch (err) {
-    console.error("Webhook signature calculation error:", err);
-    return false;
-  }
-}
+import {
+  verifyWebhookSignature,
+  extractWebhookPaymentDetails,
+} from "../_shared/payment-core.ts";
 
 serve(async (req: Request) => {
   if (req.method !== "POST") {
@@ -53,12 +29,18 @@ serve(async (req: Request) => {
 
     if (!supabaseUrl || !supabaseServiceKey || !webhookSecret) {
       console.error("Missing webhook environment configuration.");
-      return new Response("Configuration error", { status: 500 });
+      return new Response(
+        JSON.stringify({ error: "Server configuration error" }),
+        { status: 500, headers: { "Content-Type": "application/json" } }
+      );
     }
 
     const signature = req.headers.get("x-razorpay-signature");
     if (!signature) {
-      return new Response("Missing signature header", { status: 400 });
+      return new Response(
+        JSON.stringify({ error: "Missing x-razorpay-signature header" }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
     }
 
     const rawBody = await req.text();
@@ -66,52 +48,121 @@ serve(async (req: Request) => {
 
     if (!isValid) {
       console.warn("Invalid Razorpay webhook signature. Request rejected.");
-      return new Response("Invalid signature", { status: 400 });
+      return new Response(
+        JSON.stringify({ error: "Invalid webhook signature" }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
     }
 
-    const event = JSON.parse(rawBody);
+    let event: any;
+    try {
+      event = JSON.parse(rawBody);
+    } catch {
+      return new Response(
+        JSON.stringify({ error: "Malformed JSON payload" }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
     const eventType = event.event;
-    const paymentEntity = event.payload?.payment?.entity;
 
-    if (eventType === "payment.captured" || eventType === "order.paid") {
-      const razorpayPaymentId = paymentEntity?.id;
-      const razorpayOrderId = paymentEntity?.order_id;
-      const notesOrderId = paymentEntity?.notes?.order_id;
-
-      const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey);
-
-      // Find order by notes.order_id or razorpay_order_id
-      let targetOrderId = notesOrderId;
-
-      if (!targetOrderId && razorpayOrderId) {
-        const { data: payRecord } = await supabaseAdmin
-          .from("payments")
-          .select("order_id")
-          .eq("razorpay_order_id", razorpayOrderId)
-          .maybeSingle();
-
-        targetOrderId = payRecord?.order_id;
-      }
-
-      if (targetOrderId) {
-        // Execute idempotent transition
-        await supabaseAdmin.rpc("confirm_order_payment_verified", {
-          p_order_id: targetOrderId,
-          p_razorpay_order_id: razorpayOrderId,
-          p_razorpay_payment_id: razorpayPaymentId,
-          p_razorpay_signature: signature,
-          p_payment_status: "captured",
-        });
-        console.log(`Webhook successfully processed and captured payment for Order ${targetOrderId}`);
-      }
+    // We process payment.captured and order.paid events
+    if (eventType !== "payment.captured" && eventType !== "order.paid") {
+      // Return 200 for other ignored events so Razorpay acknowledges delivery
+      return new Response(
+        JSON.stringify({ status: "ignored", event: eventType }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
     }
 
-    return new Response(JSON.stringify({ status: "ok" }), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    });
-  } catch (err) {
-    console.error("Webhook processing error:", err);
-    return new Response("Internal Server Error", { status: 500 });
+    const details = extractWebhookPaymentDetails(eventType, event);
+
+    if (!details.razorpayOrderId || !details.razorpayPaymentId) {
+      console.error("Webhook payload missing order_id or payment_id:", event);
+      return new Response(
+        JSON.stringify({ error: "Incomplete payment entity in webhook payload" }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    if (details.paymentCurrency !== "INR" || details.paymentStatus !== "captured") {
+      console.warn(
+        `Webhook received non-captured or foreign payment: status=${details.paymentStatus}, currency=${details.paymentCurrency}`
+      );
+      return new Response(
+        JSON.stringify({ status: "ignored", reason: "Payment not captured or non-INR" }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey);
+
+    // Resolve bakery order using stored razorpay_order_id in payments table
+    const { data: paymentRecord, error: findError } = await supabaseAdmin
+      .from("payments")
+      .select("order_id, razorpay_order_id, status, amount")
+      .eq("razorpay_order_id", details.razorpayOrderId)
+      .maybeSingle();
+
+    if (findError) {
+      console.error("Database query error finding payment record:", findError);
+      return new Response(
+        JSON.stringify({ error: "Database lookup failure" }),
+        { status: 500, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    if (!paymentRecord) {
+      console.warn(`No bakery order associated with Razorpay order ID ${details.razorpayOrderId}`);
+      // Return 404 so if there is a transient replication delay, Razorpay retries
+      return new Response(
+        JSON.stringify({ error: "Order not found for given Razorpay order ID" }),
+        { status: 404, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    // Execute hardened confirmation RPC
+    // Webhook passes p_razorpay_signature: null, p_razorpay_webhook_signature: signature
+    const { data: confirmResult, error: confirmError } = await supabaseAdmin.rpc(
+      "confirm_order_payment_verified",
+      {
+        p_order_id: paymentRecord.order_id,
+        p_razorpay_order_id: details.razorpayOrderId,
+        p_razorpay_payment_id: details.razorpayPaymentId,
+        p_razorpay_signature: null,
+        p_razorpay_webhook_signature: signature,
+        p_amount_in_paise: details.paymentAmount,
+        p_currency: details.paymentCurrency,
+      }
+    );
+
+    if (confirmError) {
+      console.error("Webhook confirm_order_payment_verified execution failure:", confirmError);
+      return new Response(
+        JSON.stringify({ error: "Failed to confirm payment state in database" }),
+        { status: 500, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    if (confirmResult && !confirmResult.success && !confirmResult.is_already_confirmed) {
+      console.error("RPC returned business validation rejection:", confirmResult);
+      return new Response(
+        JSON.stringify({ error: confirmResult.error }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    console.log(`Webhook successfully confirmed payment for Order ${paymentRecord.order_id}`);
+    return new Response(
+      JSON.stringify({ status: "ok", result: confirmResult }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    console.error("Unhandled webhook processing error:", err);
+    return new Response(
+      JSON.stringify({ error: message }),
+      { status: 500, headers: { "Content-Type": "application/json" } }
+    );
   }
 });

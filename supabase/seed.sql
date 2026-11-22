@@ -18,6 +18,7 @@ INSERT INTO public.bakery_settings (
     is_online_ordering_enabled,
     is_cod_enabled,
     is_online_payment_enabled,
+    allow_simulated_payments,
     minimum_order_value,
     free_delivery_threshold,
     standard_delivery_fee,
@@ -39,8 +40,9 @@ INSERT INTO public.bakery_settings (
     '',
     true,
     true,
-    true,
-    0.00,
+    true, -- is_online_payment_enabled
+    false, -- allow_simulated_payments (disabled in production)
+    0.00, -- minimum_order_value
     999.00,
     49.00,
     3,
