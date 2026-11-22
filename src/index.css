@@ -4,5 +4,21 @@
 @theme {
   --font-sans: 'DM Sans', sans-serif;
   --font-serif: 'DM Serif Display', Georgia, serif;
+  --breakpoint-xs: 23.5rem;
   --breakpoint-md: 50rem;
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+    scroll-behavior: smooth;
+  }
+  body {
+    overflow-x: hidden;
+    min-width: 320px;
+  }
+  /* Ensure touch targets have no tap delay and clear focus rings */
+  button, a, input, select, textarea {
+    touch-action: manipulation;
+  }
 }

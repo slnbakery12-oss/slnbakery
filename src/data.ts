@@ -1,3 +1,27 @@
+export type BusinessInfo = {
+  name: string;
+  tagline: string;
+  address: string;
+  cityState: string;
+  phone: string;
+  mapsUrl: string;
+  ownerName: string;
+  email: string;
+  openingHours: string;
+};
+
+export const defaultBusinessInfo: BusinessInfo = {
+  name: 'Sri Laxmi Narasimha Bakery',
+  tagline: 'Baked with love. Always.',
+  address: '9-2-5, Siddipet, Bejjanki, Telangana 505528',
+  cityState: 'Bejjanki, Telangana',
+  phone: '07799801078',
+  mapsUrl: 'https://maps.app.goo.gl/eBLLt3mn3tqb87DR9?g_st=iw',
+  ownerName: '',
+  email: '',
+  openingHours: '',
+};
+
 export type Product = {
   id: number; name: string; price: number; category: string; tags: string[];
   image: string; description: string; rating: number; bestseller: boolean; available: boolean;
@@ -24,8 +48,8 @@ export const initialProducts: Product[] = [
 ];
 const today = new Date().toLocaleDateString('en-CA');
 export const initialOrders: Order[] = [
-  { id: 'BC1042', customer: 'Ananya Sharma', email: 'ananya@example.com', phone: '+91 98901 23456', address: '12 Palm Grove, Bandra West, Mumbai 400050', date: today, time: '4 PM – 7 PM', payment: 'Cash on delivery', instructions: 'Please ring the bell.', items: [{ ...initialProducts[0], key: 'sample1', weight: '1kg', egg: 'Eggless', message: 'Happy Birthday, Maa!', qty: 1, date: today, unitPrice: 1423 }], total: 1423, status: 0, createdAt: Date.now() - 3600000, sample: true },
-  { id: 'BC1041', customer: 'Rahul Mehta', email: 'rahul@example.com', phone: '+91 98765 44321', address: '8 Sea Breeze, Khar West, Mumbai 400052', date: today, time: '1 PM – 4 PM', payment: 'UPI — simulated payment', instructions: '', items: [{ ...initialProducts[1], key: 'sample2', weight: '500g', egg: 'Eggless', message: 'Our sweetest year', qty: 1, date: today, unitPrice: 899 }], total: 948, status: 2, createdAt: Date.now() - 7200000, sample: true },
-  { id: 'BC1040', customer: 'Priya Kapoor', email: 'priya@example.com', phone: '+91 98201 54321', address: '24 Hill Road, Bandra West, Mumbai 400050', date: today, time: '10 AM – 1 PM', payment: 'Cash on delivery', instructions: '', items: [{ ...initialProducts[3], key: 'sample3', weight: '1kg', egg: 'With egg', message: 'Happy Anniversary', qty: 1, date: today, unitPrice: 1898 }], total: 1898, status: 5, createdAt: Date.now() - 86400000, sample: true },
-  { id: 'BC1039', customer: 'Ananya Sharma', email: 'ananya@example.com', phone: '+91 98901 23456', address: '12 Palm Grove, Bandra West, Mumbai 400050', date: today, time: '4 PM – 7 PM', payment: 'Cash on delivery', instructions: '', items: [{ ...initialProducts[4], key: 'sample4', weight: '500g', egg: 'Eggless', message: '', qty: 2, date: today, unitPrice: 449 }], total: 947, status: 5, createdAt: Date.now() - 259200000, sample: true },
+  { id: 'BC1042', customer: 'Ananya Sharma', email: 'ananya@example.com', phone: '+91 98901 23456', address: '14 Gandhi Road, Bejjanki, Telangana 505528', date: today, time: '4 PM – 7 PM', payment: 'Cash on delivery', instructions: 'Please ring the bell.', items: [{ ...initialProducts[0], key: 'sample1', weight: '1kg', egg: 'Eggless', message: 'Happy Birthday, Maa!', qty: 1, date: today, unitPrice: 1423 }], total: 1423, status: 0, createdAt: Date.now() - 3600000, sample: true },
+  { id: 'BC1041', customer: 'Rahul Mehta', email: 'rahul@example.com', phone: '+91 98765 44321', address: '8 Main Bazar, Siddipet, Telangana 502103', date: today, time: '1 PM – 4 PM', payment: 'UPI — simulated payment', instructions: '', items: [{ ...initialProducts[1], key: 'sample2', weight: '500g', egg: 'Eggless', message: 'Our sweetest year', qty: 1, date: today, unitPrice: 899 }], total: 948, status: 2, createdAt: Date.now() - 7200000, sample: true },
+  { id: 'BC1040', customer: 'Priya Kapoor', email: 'priya@example.com', phone: '+91 98201 54321', address: '22 Collectorate Road, Siddipet, Telangana 502103', date: today, time: '10 AM – 1 PM', payment: 'Cash on delivery', instructions: '', items: [{ ...initialProducts[3], key: 'sample3', weight: '1kg', egg: 'With egg', message: 'Happy Anniversary', qty: 1, date: today, unitPrice: 1898 }], total: 1898, status: 5, createdAt: Date.now() - 86400000, sample: true },
+  { id: 'BC1039', customer: 'Ananya Sharma', email: 'ananya@example.com', phone: '+91 98901 23456', address: '14 Gandhi Road, Bejjanki, Telangana 505528', date: today, time: '4 PM – 7 PM', payment: 'Cash on delivery', instructions: '', items: [{ ...initialProducts[4], key: 'sample4', weight: '500g', egg: 'Eggless', message: '', qty: 2, date: today, unitPrice: 449 }], total: 947, status: 5, createdAt: Date.now() - 259200000, sample: true },
 ];
