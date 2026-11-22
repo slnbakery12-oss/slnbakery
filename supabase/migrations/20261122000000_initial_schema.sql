@@ -502,6 +502,40 @@ BEGIN
 END;
 $$;
 
+-- Auto-provision customer profile and assign default 'customer' role on Supabase Auth sign up
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+    INSERT INTO public.profiles (id, full_name, email, phone, avatar_url)
+    VALUES (
+        NEW.id,
+        COALESCE(NEW.raw_user_meta_data->>'full_name', NEW.raw_user_meta_data->>'name', 'Valued Customer'),
+        NEW.email,
+        NEW.phone,
+        NEW.raw_user_meta_data->>'avatar_url'
+    )
+    ON CONFLICT (id) DO UPDATE SET
+        email = EXCLUDED.email,
+        full_name = CASE WHEN profiles.full_name = 'Valued Customer' THEN EXCLUDED.full_name ELSE profiles.full_name END;
+
+    INSERT INTO public.user_roles (user_id, role)
+    VALUES (NEW.id, 'customer')
+    ON CONFLICT (user_id, role) DO NOTHING;
+
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+CREATE TRIGGER on_auth_user_created
+    AFTER INSERT ON auth.users
+    FOR EACH ROW
+    EXECUTE FUNCTION public.handle_new_user();
+
 -- ------------------------------------------------------------------------------
 -- 8. ROW LEVEL SECURITY (RLS) POLICIES
 -- ------------------------------------------------------------------------------
@@ -535,6 +569,11 @@ DROP POLICY IF EXISTS "Profiles are updateable by owner or admin" ON public.prof
 CREATE POLICY "Profiles are updateable by owner or admin" ON public.profiles
     FOR UPDATE TO authenticated
     USING (id = auth.uid() OR public.is_admin());
+
+DROP POLICY IF EXISTS "Profiles are insertable by owner" ON public.profiles;
+CREATE POLICY "Profiles are insertable by owner" ON public.profiles
+    FOR INSERT TO authenticated
+    WITH CHECK (id = auth.uid());
 
 -- User Roles Policies (Prevent self-escalation)
 DROP POLICY IF EXISTS "User roles readable by user or staff" ON public.user_roles;
@@ -1602,5 +1641,9 @@ $$;
 REVOKE EXECUTE ON FUNCTION public.confirm_order_payment_verified FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.confirm_order_payment_verified TO service_role;
 
--- Enable Supabase Realtime for orders
-ALTER PUBLICATION supabase_realtime ADD TABLE public.orders;
+-- Enable Supabase Realtime for orders (idempotent for fresh or repeated runs)
+DO $$ BEGIN
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.orders;
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
