@@ -8,6 +8,16 @@ export type BusinessInfo = {
   ownerName: string;
   email: string;
   openingHours: string;
+  deliveryFee?: number;
+  freeDeliveryThreshold?: number;
+  serviceablePostalCodes?: string[];
+  deliveryTimeSlots?: string[];
+  isOnlineOrderingEnabled?: boolean;
+  isCodEnabled?: boolean;
+  isOnlinePaymentEnabled?: boolean;
+  minLeadTimeHours?: number;
+  maxAdvanceBookingDays?: number;
+  minimumOrderValue?: number;
 };
 
 export const defaultBusinessInfo: BusinessInfo = {
@@ -20,17 +30,56 @@ export const defaultBusinessInfo: BusinessInfo = {
   ownerName: '',
   email: '',
   openingHours: '',
+  deliveryFee: 49,
+  freeDeliveryThreshold: 999,
+  serviceablePostalCodes: ['505528', '502103'],
+  deliveryTimeSlots: ['10 AM – 1 PM', '1 PM – 4 PM', '4 PM – 7 PM', '7 PM – 10 PM'],
+  isOnlineOrderingEnabled: true,
+  isCodEnabled: true,
+  isOnlinePaymentEnabled: true,
+  minLeadTimeHours: 3,
+  maxAdvanceBookingDays: 30,
+  minimumOrderValue: 0,
+};
+
+export type ProductVariant = {
+  id: string;
+  product_id: number;
+  weight_label: string;
+  weight_in_grams: number;
+  price_multiplier: number;
+  calculated_price: number;
+  is_active: boolean;
 };
 
 export type Product = {
-  id: number; name: string; price: number; category: string; tags: string[];
-  image: string; description: string; rating: number; bestseller: boolean; available: boolean;
+  id: number;
+  name: string;
+  price: number;
+  category: string;
+  tags: string[];
+  image: string;
+  description: string;
+  rating: number;
+  bestseller: boolean;
+  available: boolean;
+  variants?: ProductVariant[];
+  is_eggless_available?: boolean;
+  is_with_egg_available?: boolean;
+  slug?: string;
+  category_id?: string;
 };
 export type CartItem = Product & { key: string; weight: string; egg: string; message: string; qty: number; date: string; unitPrice: number };
 export type Order = {
   id: string; customer: string; email: string; phone: string; address: string;
   date: string; time: string; payment: string; instructions: string;
   items: CartItem[]; total: number; status: number; createdAt: number; sample: boolean;
+  subtotal?: number;
+  deliveryFee?: number;
+  discount?: number;
+  paymentStatus?: string;
+  timeline?: { status: string; notes?: string; created_at: string; }[];
+  rawStatus?: string;
 };
 export const money = (n: number) => `₹${Math.round(n).toLocaleString('en-IN')}`;
 export const steps = ['Order Placed', 'Confirmed', 'Preparing', 'Ready for Pickup', 'Out for Delivery', 'Delivered'];
